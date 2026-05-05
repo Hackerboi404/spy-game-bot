@@ -1,1 +1,54 @@
-
+Airplane
+Bank
+Beach
+Casino
+Cathedral
+Circus Tent
+Corporate Party
+Crusader Army
+Day Spa
+Diplomatic Summit
+Embassy
+Hospital
+Hotel
+Military Base
+Movie Studio
+Ocean Liner
+Passenger Train
+Pirate Ship
+Polar Station
+Police Station
+Restaurant
+School
+Service Station
+Space Station
+Submarine
+Supermarket
+The UN
+Theater
+University
+Zoo
+Museum
+Art Gallery
+Stadium
+Prison
+Factory
+Construction Site
+Farm
+Castle
+Pyramid
+Space Station
+Oil Rig
+Subway
+Rooftop
+Cemetery
+Amusement Park
+Sewer
+Opera House
+Circus
+Train Station
+Bus
+Boat
+Laboratory
+Temple
+Village
