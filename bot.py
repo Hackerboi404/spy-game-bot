@@ -1,55 +1,111 @@
 import os
-import time
-import random
 import asyncio
-from datetime import datetime
-from pyrogram import Client, filters, idle
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+import random
+from threading import Thread
+from flask import Flask, request
+from pyrogram import Client, filters
+from pyrogram.types import Message
 from game_manager import SpyGame, GameState
 from database import db
 
 # --- CONFIGURATION ---
-API_ID = 1234567  
-API_HASH = "your_api_hash_here"
-BOT_TOKEN = "your_bot_token_here"
+# Render/Heroku par Environment Variables set karna mat bhoolna
+API_ID = int(os.environ.get("API_ID", 1234567))
+API_HASH = os.environ.get("API_HASH", "your_api_hash")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "your_bot_token")
+WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://your-app-name.onrender.com")
 
-# Load Locations
+# --- FLASK APP ---
+app = Flask(__name__)
+
+# --- PYROGRAM CLIENT ---
+# in_memory=True free tiers ke liye zaroori hai
+bot = Client(
+    "spy_bot", 
+    api_id=API_ID, 
+    api_hash=API_HASH, 
+    bot_token=BOT_TOKEN,
+    in_memory=True
+)
+
+active_games = {}
+
+# --- DATA LOAD ---
 def load_locations():
     path = os.path.join(os.path.dirname(__file__), "data", "locations.txt")
     if os.path.exists(path):
         with open(path, "r") as f:
             return [line.strip() for line in f if line.strip()]
-    return ["Hospital", "School"] 
-
+    return ["Hospital", "School"]
 LOCATIONS = load_locations()
 
-# --- BOT SETUP ---
-app = Client("spy_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
-active_games = {}
+# --- CONSTANTS (Welcome & Help) ---
+WELCOME_TEXT = """
+👋 Welcome to the **Spy Game Bot**! 🕵️‍♂️
+
+I am a multiplayer game bot designed for Telegram groups. 
+Find the spy before time runs out, or deceive everyone if you are the spy!
+
+Type /help to see how to play.
+"""
+
+FEATURES_TEXT = """
+🚀 **Bot Features:**
+
+🗺️ **50+ Unique Locations**: From Space Stations to Schools.
+🎭 **Role Assignment**: Private messages for spies and civilians.
+⏱️ **Timed Rounds**: Discussion and Voting phases.
+🎯 **Balanced Guessing**: Spies must reason, not just luck-guess.
+🏆 **Rank System**: Earn XP and level up from Rookie to Master Spy.
+📊 **Leaderboard**: Compete with your friends.
+"""
+
+HOW_TO_PLAY_TEXT = """
+📖 **How to Play:**
+
+1️⃣ **Join the Game**: Use /startspy in a group and type /join.
+2️⃣ **Roles**:
+   • 🕵️ **Spy**: You don't know the location. Blend in and guess correctly!
+   • 👱 **Civilian**: You know the location. Ask questions to find the Spy!
+3️⃣ **Discussion**: Chat for 5 minutes. Be careful not to reveal too much!
+4️⃣ **Voting**: After time runs out, vote to eliminate the suspect using /vote.
+5️⃣ **Winning**:
+   • Civilians win if they vote out the Spy.
+   • Spy wins if they survive the vote OR guess the location correctly.
+
+📌 **Commands List:**
+/startspy - Start a new lobby
+/join - Join the active game
+/begin - Start the game (Host only)
+/guess <location> - Spy guesses the location
+/vote @username - Vote to eliminate a player
+/leaderboard - Top 5 players
+/mystats - Check your rank & XP
+"""
 
 # --- HELPER FUNCTIONS ---
-async def send_role(client, user_id, text):
+async def send_role(user_id, text):
     try:
-        await client.send_message(user_id, text)
+        await bot.send_message(user_id, text)
     except Exception:
-        pass 
+        pass
 
-async def start_voting_phase(chat_id, client):
+async def start_voting_phase(chat_id):
     game = active_games.get(chat_id)
     if not game: return
 
     game.state = GameState.VOTING
     game.votes = {}
     
-    await client.send_message(
+    await bot.send_message(
         chat_id, 
         "🛑 **Time's up!**\n\nDiscussion over. Please vote for the spy using /vote @username.\nYou have 60 seconds."
     )
     
-    await asyncio.sleep(60) 
-    await end_game_voting(chat_id, client)
+    await asyncio.sleep(60)
+    await end_game_voting(chat_id)
 
-async def end_game_voting(chat_id, client):
+async def end_game_voting(chat_id):
     game = active_games.get(chat_id)
     if not game: return
 
@@ -59,20 +115,18 @@ async def end_game_voting(chat_id, client):
         eliminated_user = game.players[eliminated_id]
         role = "SPY 🕵️‍♂️" if game.is_spy(eliminated_id) else "Civilian 👱"
         
-        await client.send_message(
+        await bot.send_message(
             chat_id,
             f"🗳️ **Voting Results:**\n\n"
-            f"Eliminated: {eliminated_user.mention} ({role})\n\n"
+            f"Eliminated: {eliminated_user.first_name} ({role})\n\n"
             f"Location was: **{game.location}**"
         )
 
+        # Stats Update
         res = game.calculate_results(eliminated_id)
-        
-        # Update Stats
         for pid, player in game.players.items():
             stats = db.get_user(pid, player.username)
             is_spy = game.is_spy(pid)
-            
             won = False
             if res["winner_side"] == "spies" and is_spy:
                 won = True
@@ -80,33 +134,28 @@ async def end_game_voting(chat_id, client):
             elif res["winner_side"] == "civilians" and not is_spy:
                 won = True
                 db.update_xp(pid, 30)
-            
             if won: db.increment_stat(pid, "wins")
             else: db.increment_stat(pid, "losses")
             db.increment_stat(pid, "games_played")
 
         if res["winner_side"] == "spies":
-            await client.send_message(chat_id, "🏆 **Spies Win!**")
+            await bot.send_message(chat_id, "🏆 **Spies Win!**")
         else:
-            await client.send_message(chat_id, "🏆 **Civilians Win!**")
-
+            await bot.send_message(chat_id, "🏆 **Civilians Win!**")
     else:
-        await client.send_message(chat_id, "No votes cast. Spies Win by default! 🏆")
+        await bot.send_message(chat_id, "No votes cast. Spies Win by default! 🏆")
     
     del active_games[chat_id]
 
-async def handle_game_over(chat_id, client, winner_side, message_text):
-    """Generic function to end game and update stats based on result"""
+async def handle_game_over(chat_id, winner_side, text):
     game = active_games.get(chat_id)
     if not game: return
-
-    await client.send_message(chat_id, message_text)
+    await bot.send_message(chat_id, text)
     
-    # Update Stats
+    # Stats Update
     for pid, player in game.players.items():
         stats = db.get_user(pid, player.username)
         is_spy = game.is_spy(pid)
-        
         won = False
         if winner_side == "spies" and is_spy:
             won = True
@@ -114,191 +163,146 @@ async def handle_game_over(chat_id, client, winner_side, message_text):
         elif winner_side == "civilians" and not is_spy:
             won = True
             db.update_xp(pid, 30)
-        
         if won: db.increment_stat(pid, "wins")
         else: db.increment_stat(pid, "losses")
         db.increment_stat(pid, "games_played")
-
     del active_games[chat_id]
 
-# --- COMMANDS ---
+# --- HANDLERS ---
 
-@app.on_message(filters.command("startspy") & filters.group)
-async def start_game_cmd(client, message: Message):
-    chat_id = message.chat.id
-    
-    if chat_id in active_games:
-        await message.reply("A game is already running in this group!")
-        return
+@bot.on_message(filters.command("start") & filters.private)
+async def start_private_cmd(_, message: Message):
+    await message.reply(WELCOME_TEXT)
 
-    new_game = SpyGame(chat_id, message.from_user.id)
-    active_games[chat_id] = new_game
-    
-    await message.reply(
-        "🕵️‍♂️ **Spy Game Lobby Created!**\n\n"
-        "Type /join to join the game.\n"
-        f"Host: {message.from_user.mention}\n"
-        "Waiting for players..."
-    )
+@bot.on_message(filters.command("help"))
+async def help_cmd(_, message: Message):
+    full_text = f"{FEATURES_TEXT}\n\n{HOW_TO_PLAY_TEXT}"
+    await message.reply(full_text, disable_web_page_preview=True)
 
-@app.on_message(filters.command("join") & filters.group)
-async def join_cmd(client, message: Message):
-    chat_id = message.chat.id
-    user = message.from_user
+@bot.on_message(filters.command("startspy") & filters.group)
+async def start_game_cmd(_, message: Message):
+    if message.chat.id not in active_games:
+        active_games[message.chat.id] = SpyGame(message.chat.id, message.from_user.id)
+        await message.reply(
+            "🕵️‍♂️ **Spy Game Lobby Created!**\n\n"
+            "Type /join to join the game.\n"
+            f"Host: {message.from_user.first_name}\n"
+            "Waiting for players..."
+        )
 
-    if chat_id not in active_games:
-        await message.reply("No game lobby. Use /startspy to create one.")
-        return
+@bot.on_message(filters.command("join") & filters.group)
+async def join_game(_, message: Message):
+    game = active_games.get(message.chat.id)
+    if game and game.state == GameState.LOBBY:
+        if game.add_player(message.from_user):
+            await message.reply(f"✅ {message.from_user.first_name} joined!")
 
-    game = active_games[chat_id]
-    if game.state != GameState.LOBBY:
-        await message.reply("Game already started!")
-        return
-
-    if game.add_player(user):
-        await message.reply(f"✅ {user.mention} joined! ({len(game.players)})")
-    else:
-        await message.reply("You are already in the game.")
-
-@app.on_message(filters.command("leave") & filters.group)
-async def leave_cmd(client, message: Message):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-
-    if chat_id in active_games:
-        game = active_games[chat_id]
-        if game.remove_player(user_id):
-            await message.reply(f"❌ You left the game.")
-            if len(game.players) == 0:
-                del active_games[chat_id]
+@bot.on_message(filters.command("begin") & filters.group)
+async def begin_game(_, message: Message):
+    game = active_games.get(message.chat.id)
+    if game and game.creator_id == message.from_user.id:
+        success, msg = game.start_game(LOCATIONS)
+        if success:
+            await message.reply(msg)
+            for pid, p in game.players.items():
+                await send_role(pid, game.get_role_message(pid))
+            asyncio.create_task(start_voting_phase(message.chat.id))
         else:
-            await message.reply("You are not in the game.")
+            await message.reply(msg)
 
-@app.on_message(filters.command("begin") & filters.group)
-async def begin_cmd(client, message: Message):
-    chat_id = message.chat.id
-    user_id = message.from_user.id
-
-    if chat_id not in active_games: return
-    game = active_games[chat_id]
-    
-    if user_id != game.creator_id:
-        await message.reply("Only the game host can start.")
-        return
-
-    success, msg = game.start_game(LOCATIONS)
-    if not success:
-        await message.reply(msg)
-        return
-
-    await message.reply(f"🚀 **Game Started!** \n\n{msg}\nDiscussion Phase: 5 Minutes!")
-
-    for pid, player in game.players.items():
-        role_msg = game.get_role_message(pid)
-        await send_role(client, pid, role_msg)
-
-    asyncio.create_task(start_voting_phase(chat_id, client))
-
-@app.on_message(filters.command("vote") & filters.group)
-async def vote_cmd(client, message: Message):
-    chat_id = message.chat.id
-    user = message.from_user
-    
-    if chat_id not in active_games: return
-    game = active_games[chat_id]
-    
-    # Simplified parsing: prefer reply, fallback to command arg
-    target_user = None
-    if message.reply_to_message:
-        target_user = message.reply_to_message.from_user
-    elif len(message.command) > 1:
-        username = message.command[1].replace("@", "").lower()
-        for p in game.players.values():
-            if p.username and p.username.lower() == username:
-                target_user = p
-                break
-
-    if not target_user:
-        await message.reply("Please reply to the player or use @username to vote.")
+@bot.on_message(filters.command("guess") & filters.group)
+async def guess_game(_, message: Message):
+    game = active_games.get(message.chat.id)
+    if not game or game.state != GameState.PLAYING: return
+    if not game.is_spy(message.from_user.id):
+        await message.reply("Only Spy!")
         return
     
-    success, msg = game.cast_vote(user.id, target_user.id)
-    if success:
-        await message.reply(f"✅ {msg}", reply_to_message_id=message.id)
-    else:
-        await message.reply(f"❌ {msg}")
-
-@app.on_message(filters.command("guess") & filters.group)
-async def guess_cmd(client, message: Message):
-    chat_id = message.chat.id
-    user = message.from_user
-    
-    if chat_id not in active_games: return
-    game = active_games[chat_id]
-    
-    if game.state != GameState.PLAYING:
-        await message.reply("You can only guess during the discussion phase!")
-        return
-    
-    if not game.is_spy(user.id):
-        await message.reply("Only the Spy can guess!")
-        return
-    
-    # Check Constraints (Time & Attempts)
-    can_guess, reason = game.can_guess(user.id)
+    can_guess, reason = game.can_guess(message.from_user.id)
     if not can_guess:
         await message.reply(reason)
         return
     
-    guess_text = " ".join(message.command[1:]).strip()
-    if not guess_text:
-        await message.reply("Usage: /guess <location>")
-        return
-
-    # Lock the guess immediately (prevent spam guessing)
-    game.register_guess(user.id)
-
-    # Suspense Delay (3 seconds)
-    await message.reply(f"🎲 {user.mention} is making a guess...")
-    await asyncio.sleep(3)
-
-    # Normalize for comparison (Title Case)
-    formatted_guess = guess_text.title()
+    guess = " ".join(message.command[1:]).strip()
+    game.register_guess(message.from_user.id)
     
-    if formatted_guess == game.location:
-        # Spy Wins
-        msg = (
-            f"🎉 **GUESS CORRECT!**\n\n"
-            f"The Spy ({user.mention}) correctly identified the location: **{game.location}**\n\n"
-            f"**SPY WINS!** 🏆"
-        )
-        await handle_game_over(chat_id, client, "spies", msg)
+    await message.reply(f"🎲 Guessing...")
+    await asyncio.sleep(3)
+    
+    if guess.title() == game.location:
+        await handle_game_over(message.chat.id, "spies", "🎉 Spy Guessed Correct! Spy Wins!")
     else:
-        # Spy Loses (Civilians Win)
-        msg = (
-            f"💥 **GUESS FAILED!**\n\n"
-            f"The Spy ({user.mention}) guessed: **{formatted_guess}**\n"
-            f"But the location was: **{game.location}**\n\n"
-            f"**CIVILIANS WIN!** 🏆"
-        )
-        await handle_game_over(chat_id, client, "civilians", msg)
+        await handle_game_over(message.chat.id, "civilians", "💥 Spy Wrong! Civilians Win!")
 
-@app.on_message(filters.command("mystats") & filters.private)
-async def mystats_cmd(client, message: Message):
+@bot.on_message(filters.command("vote") & filters.group)
+async def vote_game(_, message: Message):
+    game = active_games.get(message.chat.id)
+    if game and game.state == GameState.VOTING:
+        if message.reply_to_message:
+            target = message.reply_to_message.from_user
+            game.cast_vote(message.from_user.id, target.id)
+            await message.reply(f"Voted {target.first_name}")
+
+@bot.on_message(filters.command("mystats") & filters.private)
+async def mystats_cmd(_, message: Message):
     user_id = message.from_user.id
     stats = db.get_user(user_id, message.from_user.username)
     rank = db.get_rank(stats['xp'])
-    text = f"👤 **Stats**\n🏆 Rank: {rank}\n⭐ XP: {stats['xp']}\n✅ Wins: {stats['wins']}"
-    await message.reply(text)
+    await message.reply(f"👤 **Stats**\n🏆 Rank: {rank}\n⭐ XP: {stats['xp']}")
 
-@app.on_message(filters.command("leaderboard") & filters.group)
-async def leaderboard_cmd(client, message: Message):
+@bot.on_message(filters.command("leaderboard") & filters.group)
+async def leaderboard_cmd(_, message: Message):
     top = db.get_leaderboard(5)
     text = "🏆 **Leaderboard**\n\n"
     for i, (name, xp) in enumerate(top, 1):
         text += f"{i}. {name} - {xp} XP\n"
     await message.reply(text)
 
+# --- FLASK ROUTES ---
+
+@app.route("/", methods=["GET", "POST"])
+def webhook():
+    # Telegram POST request yahan aayega
+    if request.method == "GET":
+        return "Spy Game Bot is Running via Webhook! 🚀"
+    
+    # Raw data le lo
+    update = request.get_data()
+    
+    # Pyrogram dispatcher ko update bhej do
+    # Hum Thread-Safe tarike se loop mein trigger karenge
+    asyncio.run_coroutine_threadsafe(
+        bot.dispatcher.handle_update(update),
+        bot.loop
+    )
+    
+    return "OK", 200
+
+# --- BOOTSTRAP ---
+
+def run_pyrogram():
+    """Runs the bot client in a separate thread to keep Flask running"""
+    # Webhook setup
+    print("Setting Webhook...")
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    bot.start()
+    bot.delete_webhook()
+    # Yahan URL ke end mein /webhook add kar rahe hain kyunki Flask ka route root "/" hai
+    # Lekin best practice alag route rakna hota hai. Simple rahne ke liye root use kar rahe hain.
+    bot.set_webhook(url=f"{WEBHOOK_URL}/") 
+    
+    print(f"Webhook set to: {WEBHOOK_URL}/")
+    
+    # Loop ko idle mein rakhein
+    bot.idle()
+
 if __name__ == "__main__":
-    print("Bot Started...")
-    app.run()
+    # 1. Start Pyrogram in background
+    t = Thread(target=run_pyrogram)
+    t.start()
+    
+    # 2. Start Flask Server
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
