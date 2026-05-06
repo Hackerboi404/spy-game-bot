@@ -1,6 +1,7 @@
 import os
 import asyncio
 import random
+import json  # <--- ADDED
 from threading import Thread
 from flask import Flask, request
 from pyrogram import Client, filters
@@ -266,13 +267,14 @@ def webhook():
     if request.method == "GET":
         return "Spy Game Bot is Running via Webhook! 🚀"
     
-    # Raw data le lo
-    update = request.get_data()
+    # 1. Raw JSON data lo
+    str_data = request.get_data(as_text=True)
+    data = json.loads(str_data)
     
-    # Pyrogram dispatcher ko update bhej do
-    # Hum Thread-Safe tarike se loop mein trigger karenge
+    # 2. Thread-Safe tareeke se Pyrogram ke loop mein update daalo
+    # dispatcher.handle_update direct use nahi karte, put queue use karte hain
     asyncio.run_coroutine_threadsafe(
-        bot.dispatcher.handle_update(update),
+        bot.update_queue.put(data),
         bot.loop
     )
     
@@ -282,25 +284,32 @@ def webhook():
 
 def run_pyrogram():
     """Runs the bot client in a separate thread to keep Flask running"""
-    # Webhook setup
     print("Setting Webhook...")
+    
+    # Async function create karke run karenge
+    async def start_and_set_webhook():
+        await bot.start()
+        await bot.delete_webhook()
+        # URL set karo
+        await bot.set_webhook(url=f"{WEBHOOK_URL}/")
+        print(f"Webhook set to: {WEBHOOK_URL}/")
+        # Idly rukho taaki loop band na ho
+        await asyncio.Event().wait()
+
+    # New Event Loop banayein
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
-    bot.start()
-    bot.delete_webhook()
-    # Yahan URL ke end mein /webhook add kar rahe hain kyunki Flask ka route root "/" hai
-    # Lekin best practice alag route rakna hota hai. Simple rahne ke liye root use kar rahe hain.
-    bot.set_webhook(url=f"{WEBHOOK_URL}/") 
+    # Async function chalayein
+    loop.run_until_complete(start_and_set_webhook())
     
-    print(f"Webhook set to: {WEBHOOK_URL}/")
-    
-    # Loop ko idle mein rakhein
-    bot.idle()
+    # Loop ko idle mein rakhein (yeh line kabhi hit nahi hogi kyunki upar wait() laga hai)
+    # Lekin safety ke liye loop close karna zaroori nahi hai kyunki idle mein chalna chahiye
+    loop.run_forever()
 
 if __name__ == "__main__":
     # 1. Start Pyrogram in background
-    t = Thread(target=run_pyrogram)
+    t = Thread(target=run_pyrogram, daemon=True)
     t.start()
     
     # 2. Start Flask Server
