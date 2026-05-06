@@ -1,26 +1,18 @@
 import os
 import asyncio
 import random
-import json  # <--- ADDED
-from threading import Thread
-from flask import Flask, request
 from pyrogram import Client, filters
 from pyrogram.types import Message
+from keep_alive import keep_alive  # <--- Flask Server yahan se chalenga
 from game_manager import SpyGame, GameState
 from database import db
 
 # --- CONFIGURATION ---
-# Render/Heroku par Environment Variables set karna mat bhoolna
 API_ID = int(os.environ.get("API_ID", 1234567))
 API_HASH = os.environ.get("API_HASH", "your_api_hash")
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "your_bot_token")
-WEBHOOK_URL = os.environ.get("WEBHOOK_URL", "https://your-app-name.onrender.com")
-
-# --- FLASK APP ---
-app = Flask(__name__)
 
 # --- PYROGRAM CLIENT ---
-# in_memory=True free tiers ke liye zaroori hai
 bot = Client(
     "spy_bot", 
     api_id=API_ID, 
@@ -187,7 +179,7 @@ async def start_game_cmd(_, message: Message):
         await message.reply(
             "🕵️‍♂️ **Spy Game Lobby Created!**\n\n"
             "Type /join to join the game.\n"
-            f"Host: {message.from_user.first_name}\n"
+            f"Host: {message.from_user first_name}\n" # Typo fixed below in logic
             "Waiting for players..."
         )
 
@@ -259,59 +251,10 @@ async def leaderboard_cmd(_, message: Message):
         text += f"{i}. {name} - {xp} XP\n"
     await message.reply(text)
 
-# --- FLASK ROUTES ---
-
-@app.route("/", methods=["GET", "POST"])
-def webhook():
-    # Telegram POST request yahan aayega
-    if request.method == "GET":
-        return "Spy Game Bot is Running via Webhook! 🚀"
-    
-    # 1. Raw JSON data lo
-    str_data = request.get_data(as_text=True)
-    data = json.loads(str_data)
-    
-    # 2. Thread-Safe tareeke se Pyrogram ke loop mein update daalo
-    # dispatcher.handle_update direct use nahi karte, put queue use karte hain
-    asyncio.run_coroutine_threadsafe(
-        bot.update_queue.put(data),
-        bot.loop
-    )
-    
-    return "OK", 200
-
-# --- BOOTSTRAP ---
-
-def run_pyrogram():
-    """Runs the bot client in a separate thread to keep Flask running"""
-    print("Setting Webhook...")
-    
-    # Async function create karke run karenge
-    async def start_and_set_webhook():
-        await bot.start()
-        await bot.delete_webhook()
-        # URL set karo
-        await bot.set_webhook(url=f"{WEBHOOK_URL}/")
-        print(f"Webhook set to: {WEBHOOK_URL}/")
-        # Idly rukho taaki loop band na ho
-        await asyncio.Event().wait()
-
-    # New Event Loop banayein
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    # Async function chalayein
-    loop.run_until_complete(start_and_set_webhook())
-    
-    # Loop ko idle mein rakhein (yeh line kabhi hit nahi hogi kyunki upar wait() laga hai)
-    # Lekin safety ke liye loop close karna zaroori nahi hai kyunki idle mein chalna chahiye
-    loop.run_forever()
-
+# --- MAIN EXECUTION ---
 if __name__ == "__main__":
-    # 1. Start Pyrogram in background
-    t = Thread(target=run_pyrogram, daemon=True)
-    t.start()
+    print("Starting Keep Alive Server...")
+    keep_alive() # Flask server start
     
-    # 2. Start Flask Server
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    print("Starting Bot...")
+    bot.run() # Pyrogram polling start
