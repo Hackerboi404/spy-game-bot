@@ -179,7 +179,7 @@ async def start_game_cmd(_, message: Message):
         await message.reply(
             "🕵️‍♂️ **Spy Game Lobby Created!**\n\n"
             "Type /join to join the game.\n"
-            f"Host: {message.from_user first_name}\n" # Typo fixed below in logic
+            f"Host: {message.from_user.first_name}\n"
             "Waiting for players..."
         )
 
